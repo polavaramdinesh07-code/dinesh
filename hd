@@ -1,1 +1,116 @@
+import os, json, pandas as pd
+from fsspec.core import open_files
+
+def load_table(uri: str) -> pd.DataFrame:
+    """Load CSV / JSON / JSONL from local path, S3 file, or S3 prefix (concat)."""
+    if uri.endswith("/"):  # prefix/folder: read all files under it
+        files = open_files(uri + "*", mode="rb")
+        parts = []
+        for f in files:
+            p = f.path.lower()
+            if p.endswith(".csv"):
+                parts.append(pd.read_csv(f.open()))
+            elif p.endswith((".jsonl",".ndjson")):
+                parts.append(pd.read_json(f.open(), lines=True))
+            elif p.endswith(".json"):
+                with f.open() as fh:
+                    data = json.load(fh)
+                if isinstance(data, list):
+                    parts.append(pd.DataFrame(data))
+                elif isinstance(data, dict) and "data" in data and isinstance(data["data"], list):
+                    parts.append(pd.DataFrame(data["data"]))
+        if not parts:
+            raise ValueError("No .csv/.json/.jsonl files found under prefix.")
+        return pd.concat(parts, ignore_index=True)
+
+    u = uri.lower()
+    if u.endswith(".csv"):
+        return pd.read_csv(uri)
+    if u.endswith((".jsonl",".ndjson")):
+        return pd.read_json(uri, lines=True)
+    if u.endswith(".json"):
+        with open(uri, "r") if uri.startswith(("file://","/")) else open_files([uri])[0].open() as f:
+            data = json.load(f)
+        if isinstance(data, list):
+            return pd.DataFrame(data)
+        if isinstance(data, dict) and "data" in data and isinstance(data["data"], list):
+            return pd.DataFrame(data["data"])
+        raise ValueError("JSON must be a list of rows or have a top-level 'data' list.")
+    raise ValueError("Only .csv, .json, .jsonl inputs are supported.")
+
+
+
+
+
+def ls_to_table(df: pd.DataFrame) -> pd.DataFrame:
+    """Flatten LS tasks to rows with image, class_name, bbox (px), and image dims."""
+    rows = []
+    for _, r in df.iterrows():
+        data = r.get("data", {}) if isinstance(r.get("data"), dict) else {}
+        image = data.get("image") or data.get("storage_filename") or r.get("file_upload")
+
+        anns = r.get("annotations") or []
+        had_box = False
+        for ann in anns:
+            for res in (ann.get("result") or []):
+                if res.get("type") != "rectanglelabels":
+                    continue
+                v = res.get("value", {}) or {}
+                labels = v.get("rectanglelabels") or v.get("labels") or []
+                label = labels[0] if labels else None
+
+                # image size (many LS exports put these on the result)
+                ow = res.get("original_width")  or data.get("image_width")  or data.get("img_width")  or data.get("width")
+                oh = res.get("original_height") or data.get("image_height") or data.get("img_height") or data.get("height")
+                if not ow or not oh:  # cannot convert % → px without dims
+                    continue
+
+                # LS stores bbox in percentages of image size
+                xmin = (v.get("x", 0.0)       / 100.0) * ow
+                ymin = (v.get("y", 0.0)       / 100.0) * oh
+                xmax = xmin + (v.get("width", 0.0)  / 100.0) * ow
+                ymax = ymin + (v.get("height", 0.0) / 100.0) * oh
+
+                rows.append(dict(
+                    image=image, class_name=label,
+                    xmin=xmin, ymin=ymin, xmax=xmax, ymax=ymax,
+                    img_width=ow, img_height=oh
+                ))
+                had_box = True
+
+        # Background-only image (no boxes)
+        if not had_box:
+            ow = data.get("image_width") or data.get("img_width") or data.get("width")
+            oh = data.get("image_height") or data.get("img_height") or data.get("height")
+            rows.append(dict(
+                image=image, class_name="__background__",
+                xmin=None, ymin=None, xmax=None, ymax=None,
+                img_width=ow, img_height=oh
+            ))
+
+    return pd.DataFrame(rows)
+
+
+
+
+# Set your inputs/outputs
+INPUT_URI = "s3://datasci-share/drone_asset_detection/annotations/labelstudio/20251024/"  # file or prefix
+OUTDIR    = "s3://datasci-share/drone_asset_detection/outputs/bbox_stats_out/"           # or local "bbox_stats_out"
+
+raw = load_table(INPUT_URI)
+print("Loaded rows:", len(raw))
+print("Columns:", list(raw.columns)[:12])
+
+flat = ls_to_table(raw)
+print("Flattened rows:", len(flat))
+print(flat.head())
+
+# Minimal check your later code expects:
+needed = {"image","class_name","xmin","ymin","xmax","ymax"}
+missing = needed - set(flat.columns)
+if missing:
+    raise ValueError(f"Missing columns after flatten: {missing}")
+
+# Now pass `flat` into your sanitize/add_derive/stats pipeline
+df = flat.copy()
 
