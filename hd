@@ -1,1 +1,66 @@
+import pandas as pd
+import numpy as np
+
+# ---- INPUT ----
+# Any tabular file with at least: image, class_name, xmin, ymin and (xmax,ymax OR width,height)
+df = pd.read_csv("boxes_with_xmin_ymin.csv")   # or read_json(...)
+
+# If you have xmax,ymax:
+if {"xmax","ymax"}.issubset(df.columns):
+    df["width"]  = df["xmax"] - df["xmin"]
+    df["height"] = df["ymax"] - df["ymin"]
+# Else if you already have width/height, keep as-is
+
+# Basic hygiene
+df["valid"] = (df["width"] > 0) & (df["height"] > 0)
+dfv = df[df["valid"]].copy()
+
+# Derivatives
+dfv["area"]   = dfv["width"] * dfv["height"]
+dfv["aspect"] = dfv["width"] / dfv["height"]
+
+# Optional COCO-style size bucket by area (px^2)
+def coco_bucket(a):
+    if a < 32*32:        return "small"
+    elif a <= 96*96:     return "medium"
+    else:                return "large"
+dfv["coco_size"] = dfv["area"].apply(coco_bucket)
+
+# ---- STATS (by class) ----
+by_class = (dfv.groupby("class_name")
+    .agg(
+        boxes=("area","size"),
+        w_min=("width","min"),   w_med=("width","median"),   w_mean=("width","mean"),   w_max=("width","max"),
+        h_min=("height","min"),  h_med=("height","median"),  h_mean=("height","mean"),  h_max=("height","max"),
+        a_min=("area","min"),    a_med=("area","median"),    a_mean=("area","mean"),    a_max=("area","max"),
+        ar_med=("aspect","median"), ar_mean=("aspect","mean")
+    )
+    .reset_index()
+)
+
+# COCO bucket mix per class
+size_mix = (dfv.groupby(["class_name","coco_size"])
+              .size().reset_index(name="count")
+              .pivot(index="class_name", columns="coco_size", values="count")
+              .fillna(0).astype(int)
+              .reset_index())
+
+# Per-image counts (helps spot outliers)
+per_image = (dfv.groupby(["image"])
+               .agg(boxes=("class_name","size"))
+               .reset_index()
+               .sort_values("boxes", ascending=False))
+
+# Invalid boxes audit
+invalids = (df[~df["valid"]]
+            .assign(reason=np.where((df["width"]<=0)|(df["height"]<=0), "non_positive_dims", "other"))
+            .groupby("reason").size().reset_index(name="count"))
+
+# ---- OUTPUT ----
+by_class.to_csv("bbox_stats_by_class.csv", index=False)
+size_mix.to_csv("bbox_coco_buckets_by_class.csv", index=False)
+per_image.to_csv("bbox_counts_per_image.csv", index=False)
+invalids.to_csv("bbox_invalid_summary.csv", index=False)
+
+print("Wrote: bbox_stats_by_class.csv, bbox_coco_buckets_by_class.csv, bbox_counts_per_image.csv, bbox_invalid_summary.csv")
 
