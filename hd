@@ -1,1 +1,36 @@
+print(f"Searching for annotation files in s3://{ANNOTATIONS_BUCKET}/{ANNOTATIONS_PREFIX}...")
 
+    for page in pages:
+        if 'Contents' in page:
+            for obj in page['Contents']:
+                # Filter for files (and maybe for .json extension if needed)
+                if not obj['Key'].endswith('/'): 
+                    annotation_s3_key = obj['Key']
+                    annotation_filename = os.path.basename(annotation_s3_key)
+                    local_annotation_path = os.path.join(LOCAL_DOWNLOAD_DIR, annotation_filename)
+
+                    print(f"\n--- Starting processing for: {annotation_filename} ---")
+                    
+                    # A. Download the annotation JSON file
+                    if download_file_from_s3(ANNOTATIONS_BUCKET, annotation_s3_key, local_annotation_path):
+                        
+                        # B. Process the single file
+                        crops_count = process_annotation_file(annotation_s3_key,local_annotation_path)
+                        total_crops_uploaded += crops_count
+                        total_files_processed += 1
+                        
+                        # C. Cleanup the local JSON file
+                        os.remove(local_annotation_path)
+    
+    print(f"\n✅ All batches processed. Total files: {total_files_processed}. Total crops uploaded: **{total_crops_uploaded}**")
+
+# Note: You'll need to define a separate download_file_from_s3 function
+# to handle the JSON download, distinct from the image download.
+def download_annotations_file_from_s3(bucket, key, local_path):
+    """Downloads any file from S3."""
+    try:
+        s3.download_file(bucket, key, local_path)
+        return True
+    except Exception as e:
+        print(f"Error downloading {key} from {bucket}: {e}")
+        return False
