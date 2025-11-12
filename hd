@@ -1,1 +1,28 @@
+import torch
 
+checkpoint = torch.load("fasterrcnn_model.pth", map_location="cpu")
+
+# If it's a plain state_dict
+if "model_state_dict" in checkpoint:
+    state_dict = checkpoint["model_state_dict"]
+else:
+    state_dict = checkpoint
+
+for k, v in state_dict.items():
+    if "box_predictor.cls_score.weight" in k:
+        print(f"{k} → {v.shape}")
+
+import torch
+from torchvision.models.detection import fasterrcnn_resnet50_fpn
+
+num_classes = 3 
+model = fasterrcnn_resnet50_fpn(weights=None, num_classes=num_classes)
+
+checkpoint_path = "fasterrcnn_model.pth"
+model.load_state_dict(torch.load(checkpoint_path))
+model.eval()
+
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+model.to(device)
+
+print("Model loaded successfully!")
