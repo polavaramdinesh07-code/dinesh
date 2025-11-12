@@ -1,1 +1,27 @@
+output = results[0]
+    boxes = output['boxes'].cpu().numpy().tolist()
+    scores = output['scores'].cpu().numpy().tolist()
+    labels = output['labels'].cpu().numpy().tolist()
 
+    pred_data = []
+    for i in range(len(scores)):
+        if scores[i] >= 0.5:
+            pred_data.append({
+                "class": int(labels[i]),
+                "confidence": float(scores[i]),
+                "bbox": [float(x) for x in boxes[i]]
+            })
+
+    predictions[img_name] = pred_data
+
+    # --- Release memory ---
+    del img_tensor, outputs, output
+    torch.cuda.empty_cache()
+    gc.collect()
+
+# --- Save predictions ---
+OUTPUT_JSON = "predictions.json"
+with open(OUTPUT_JSON, "w") as f:
+    json.dump(predictions, f, indent=2)
+
+print(f"Predictions saved at {OUTPUT_JSON}")
