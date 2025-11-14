@@ -1,1 +1,83 @@
+import boto3
+import json
+from urllib.parse import urlparse
+from collections import defaultdict
+import random
 
+s3 = boto3.client("s3")
+
+# -----------------------------
+# 1. READ LABEL STUDIO JSON FROM S3
+# -----------------------------
+
+ANNOTATION_BUCKET = "your-bucket"
+ANNOTATION_KEY = "annotations/labelstudio.json"
+
+obj = s3.get_object(Bucket=ANNOTATION_BUCKET, Key=ANNOTATION_KEY)
+annotations = json.loads(obj['Body'].read().decode('utf-8'))
+
+# -----------------------------
+# 2. PARSE CLASS LABELS FROM LS JSON
+# -----------------------------
+
+class_to_images = defaultdict(list)
+
+def parse_s3_url(url):
+    parsed = urlparse(url)
+    return parsed.netloc, parsed.path.lstrip('/')
+
+for item in annotations:
+    image_url = item["data"]["image"]
+    image_bucket, image_key = parse_s3_url(image_url)
+
+    ann = item.get("annotations", [])
+    if not ann:
+        continue
+
+    # Multiple objects possible
+    for result in ann[0]["result"]:
+        labels = result["value"].get("rectanglelabels")
+        if labels:
+            label = labels[0]
+            class_to_images[label].append((image_bucket, image_key))
+
+# -----------------------------
+# 3. SHOW CLASS COUNTS
+# -----------------------------
+print("\nClass distribution:")
+for label, imgs in class_to_images.items():
+    print(f"{label}: {len(imgs)}")
+
+# -----------------------------
+# 4. FIND IMBALANCE
+# -----------------------------
+
+max_class_count = max(len(imgs) for imgs in class_to_images.values())
+
+print("\nTarget count per class (oversampling):", max_class_count)
+
+# -----------------------------
+# 5. OVERSAMPLING LOGIC
+# -----------------------------
+
+OUTPUT_PREFIX = "balanced_dataset/"  # output folder in S3
+TARGET_BUCKET = ANNOTATION_BUCKET    # can be different
+
+for label, images in class_to_images.items():
+    count = len(images)
+    deficit = max_class_count - count
+
+    # Copy original images first
+    for bucket, key in images:
+        new_key = f"{OUTPUT_PREFIX}/{label}/{key.split('/')[-1]}"
+        s3.copy({"Bucket": bucket, "Key": key}, TARGET_BUCKET, new_key)
+
+    # Oversample (random copy)
+    if deficit > 0:
+        print(f"Oversampling {label}: adding {deficit} images")
+        for i in range(deficit):
+            bucket, key = random.choice(images)
+            new_key = f"{OUTPUT_PREFIX}/{label}/aug_{i}_{key.split('/')[-1]}"
+            s3.copy({"Bucket": bucket, "Key": key}, TARGET_BUCKET, new_key)
+
+print("Dataset balancing complete!")
