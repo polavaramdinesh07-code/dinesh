@@ -1,1 +1,47 @@
+First change is 
+Line #136 add the following line 
 
+image_original_width,image_original_height = get_image_dimensions(image_file)
+
+Second change is 
+Then all the places where we added image height and image width as 0 put image_original_width instead of 0 and image_original_height instead of 0
+
+In Line numbers #173,174 and #185,186
+
+
+Third change is 
+
+At line number #85
+
+def get_image_from_s3(s3_key):
+    try:
+        s3_object = s3_client.get_object(Bucket=S3_BUCKET_NAME, Key=s3_key)
+        return BytesIO(s3_object['Body'].read())
+    except Exception as e:
+        print(f"Error downloading {s3_key} from S3: {e}")
+        return None
+
+def get_image_dimensions(s3_key):
+    image_bytes = get_image_from_s3(s3_key)
+    if image_bytes is None:
+        return 0, 0
+    try:
+        img = Image.open(image_bytes)
+        return img.width, img.height
+    except Exception as e:
+        print(f"Error reading dimensions for {s3_key}: {e}")
+        return 0, 0
+
+
+Fourth change is add these lines at the beginning of the code make sure all this are imported
+
+Replace the correct s3 bucket name 
+
+import json
+import boto3
+from PIL import Image
+from io import BytesIO
+
+S3_BUCKET_NAME = 'your-s3-bucket-name'
+
+s3_client = boto3.client('s3')
