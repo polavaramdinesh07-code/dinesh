@@ -1,1 +1,152 @@
+import boto3
+import tarfile
+import io
+import os
+import json
+import torch
+import pandas as pd
+from PIL import Image
+import numpy as np
+from ultralytics import YOLO # Using the recommended library for modern YOLO models
 
+# --- S3 Configuration ---
+# Model Input
+MODEL_BUCKET = "your-model-bucket-name"
+MODEL_KEY = "models/my_yolov5_model.tar.gz"  # Path to the model file in S3
+
+# Image Input
+IMAGE_BUCKET = "your-image-data-bucket"
+IMAGE_PREFIX = "images_to_predict/"  # Folder/Prefix containing the images in S3
+
+# JSON Output
+OUTPUT_BUCKET = "your-output-bucket-name"
+OUTPUT_KEY = "predictions/predictions.json" # Output path for the JSON file
+LOCAL_MODEL_DIR = "/tmp/extracted_model" 
+YOLOV5_WEIGHTS_FILENAME = "best.pt" # Standard filename for trained YOLOv5 weights
+
+# --- AWS Client Initialization ---
+s3_client = boto3.client('s3')
+
+# --- Prediction Functions ---
+
+def load_yolov5_model_from_s3(bucket, key, local_dir, weights_filename):
+    """
+    Downloads the model.tar.gz from S3, extracts the YOLOv5 weights,
+    and loads the YOLOv5 model object.
+    """
+    print(f"Downloading model: s3://{bucket}/{key}")
+    
+    # 1. Download the tar.gz file object from S3 into memory
+    obj = s3_client.get_object(Bucket=bucket, Key=key)
+    tar_content = io.BytesIO(obj['Body'].read())
+
+    # 2. Extract the contents
+    print(f"Extracting model to {local_dir}...")
+    os.makedirs(local_dir, exist_ok=True)
+    with tarfile.open(fileobj=tar_content, mode='r:gz') as tar:
+        # Find the specific weights file within the archive
+        try:
+            tar.extract(weights_filename, path=local_dir)
+        except KeyError:
+            print(f"Error: Could not find '{weights_filename}' in the archive.")
+            return None
+    
+    # 3. Load the YOLOv5 model
+    model_path = os.path.join(local_dir, weights_filename)
+    print(f"Loading YOLOv5 model from {model_path}...")
+    try:
+        # Use ultralytics YOLO class to load the weights
+        model = YOLO(model_path) 
+        return model
+    except Exception as e:
+        print(f"Error loading YOLO model: {e}")
+        return None
+
+def process_s3_images():
+    """
+    Main function to load the model, process all images, and save results to JSON.
+    """
+    # 1. Load the YOLOv5 model
+    model = load_yolov5_model_from_s3(
+        MODEL_BUCKET, MODEL_KEY, LOCAL_MODEL_DIR, YOLOV5_WEIGHTS_FILENAME
+    )
+    if model is None:
+        print("Model loading failed. Aborting.")
+        return
+
+    print("-" * 30)
+    print(f"Processing images in s3://{IMAGE_BUCKET}/{IMAGE_PREFIX}")
+    
+    # 2. List all images in the S3 folder
+    s3_objects = s3_client.list_objects_v2(
+        Bucket=IMAGE_BUCKET,
+        Prefix=IMAGE_PREFIX
+    )
+    
+    image_keys = [
+        content['Key'] for content in s3_objects.get('Contents', [])
+        if content['Key'].lower().endswith(('.jpg', '.jpeg', '.png'))
+    ]
+
+    if not image_keys:
+        print("No images found in the specified S3 folder.")
+        return
+    
+    all_predictions = {}
+    
+    # 3. Iterate through images, process, and predict
+    for key in image_keys:
+        print(f"  -> Processing image: {key}")
+        try:
+            # Download image bytes
+            img_obj = s3_client.get_object(Bucket=IMAGE_BUCKET, Key=key)
+            image_bytes = img_obj['Body'].read()
+            
+            # Convert bytes to PIL Image (which YOLO model can handle)
+            image = Image.open(io.BytesIO(image_bytes)).convert('RGB')
+            
+            # Run Inference (results is a list of Result objects)
+            results = model.predict(source=image, verbose=False)
+            
+            # Extract and format predictions
+            predictions_for_image = []
+            if results and len(results) > 0:
+                # Get the results for the first image in the batch (which is all we have)
+                # The .pandas() method is very useful for structured output
+                df = results[0].pandas().xyxy[0] 
+                
+                # Convert DataFrame to a list of dicts for JSON
+                for _, row in df.iterrows():
+                    predictions_for_image.append({
+                        "box_xyxy": [float(row['xmin']), float(row['ymin']), 
+                                     float(row['xmax']), float(row['ymax'])],
+                        "confidence": float(row['confidence']),
+                        "class_id": int(row['class']),
+                        "class_name": row['name']
+                    })
+            
+            all_predictions[key] = predictions_for_image
+            
+        except Exception as e:
+            print(f"  -> ERROR on {key}: {e}")
+            all_predictions[key] = [{"error": str(e)}]
+
+    # 4. Generate and Upload the Final JSON file
+    final_json_data = json.dumps(all_predictions, indent=4)
+    
+    # Upload the JSON string to S3
+    s3_client.put_object(
+        Bucket=OUTPUT_BUCKET,
+        Key=OUTPUT_KEY,
+        Body=final_json_data,
+        ContentType='application/json'
+    )
+
+    print("-" * 30)
+    print(f"✅ Prediction completed and JSON uploaded to s3://{OUTPUT_BUCKET}/{OUTPUT_KEY}")
+    print("\n")
+    
+    return all_predictions
+
+if __name__ == "__main__":
+    process_s3_images()
